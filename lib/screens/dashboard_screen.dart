@@ -575,20 +575,6 @@ class _ANMDashboard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // ANM-specific dashboard content
-    return const Center(
-      child: Text('ANM Dashboard - Coming Soon'),
-    );
-  }
-}
-
-class _PHCDashboard extends StatelessWidget {
-  final User user;
-  
-  const _PHCDashboard({required this.user});
-
-  @override
-  Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Consumer<DataProvider>(
       builder: (context, data, _) {
@@ -613,7 +599,7 @@ class _PHCDashboard extends StatelessWidget {
                       style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
                     ),
                     const Text(
-                      'PHC Supervisor',
+                      'ANM Supervisor',
                       style: TextStyle(color: Colors.white70, fontSize: 12),
                     ),
                   ],
@@ -1165,6 +1151,60 @@ class _PHCDashboard extends StatelessWidget {
       return null;
     }
   }
+}
+
+class _PHCDashboard extends StatelessWidget {
+    final User user;
+    const _PHCDashboard({required this.user});
+
+    @override
+    Widget build(BuildContext context) {
+      // Placeholder for higher-level reporting and analytics
+    return Scaffold(
+        body: CustomScrollView(
+          slivers: [
+            SliverAppBar(
+              expandedHeight: 120,
+              floating: false,
+              pinned: true,
+              backgroundColor: Theme.of(context).colorScheme.primary,
+              flexibleSpace: FlexibleSpaceBar(
+                title: Column(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Welcome, ${user.name.split(' ').first}',
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                    ),
+                    const Text(
+                      'PHC Reporting',
+                      style: TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                  ],
+                ),
+                titlePadding: const EdgeInsets.only(left: 16, bottom: 16),
+              ),
+              actions: const [SyncStatus(), SizedBox(width: 8)],
+            ),
+            SliverPadding(
+              padding: const EdgeInsets.all(16),
+              sliver: SliverList(
+                delegate: SliverChildListDelegate([
+                  const SizedBox(height: 24),
+                  const Center(
+                    child: Text('Analytics and reports will appear here.',
+                        style: TextStyle(fontSize: 16)),
+                  ),
+                  const SizedBox(height: 400),
+                ]),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+  }
 
   void _showIssueDetails(BuildContext context, VerificationIssue issue, DataProvider data) {
     showModalBottomSheet(
@@ -1361,5 +1401,3 @@ class _PHCDashboard extends StatelessWidget {
       Navigator.of(context).pushReplacementNamed('/login');
     }
   }
-
-}
