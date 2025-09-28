@@ -12,6 +12,7 @@ import 'anc_visit_form.dart';
 import 'immunization_form.dart';
 import '../services/cloud_sync_service.dart' as cloud;
 import '../models/asha_task.dart';
+import '../models/verification_issue.dart';
 
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key});
@@ -591,9 +592,9 @@ class _PHCDashboard extends StatelessWidget {
     final theme = Theme.of(context);
     return Consumer<DataProvider>(
       builder: (context, data, _) {
-        final workers = data.ashaWorkers;
-        final conflicts = data.getConflictRecords();
-        final incompletes = data.getIncompleteRecords();
+  final workers = data.ashaWorkers;
+  final conflictIssues = data.getConflictIssues();
+  final incompleteIssues = data.getIncompleteIssues();
 
         return CustomScrollView(
           slivers: [
@@ -637,7 +638,7 @@ class _PHCDashboard extends StatelessWidget {
                   // Workforce overview
                   Text('ASHA Workforce', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 12),
-                  ...workers.map((w) => _buildAshaRow(context, w, data)).toList(),
+                  ...workers.map((w) => _buildAshaRow(context, w, data)),
 
                   const SizedBox(height: 16),
                   Align(
@@ -652,9 +653,27 @@ class _PHCDashboard extends StatelessWidget {
                   const SizedBox(height: 24),
                   Text('Data Verification', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 12),
-                  _buildVerificationSection(context, 'Conflicts', conflicts, Colors.red, Icons.report_gmailerrorred_outlined),
+                  _buildVerificationSection(
+                    context,
+                    'Conflicts',
+                    conflictIssues,
+                    Colors.red,
+                    Icons.report_gmailerrorred_outlined,
+                    data,
+                    user,
+                    workers,
+                  ),
                   const SizedBox(height: 12),
-                  _buildVerificationSection(context, 'Incomplete Records', incompletes, Colors.orange, Icons.assignment_late_outlined),
+                  _buildVerificationSection(
+                    context,
+                    'Incomplete Records',
+                    incompleteIssues,
+                    Colors.orange,
+                    Icons.assignment_late_outlined,
+                    data,
+                    user,
+                    workers,
+                  ),
 
                   const SizedBox(height: 80),
                 ]),
@@ -821,14 +840,23 @@ class _PHCDashboard extends StatelessWidget {
     );
   }
 
-  Widget _buildVerificationSection(BuildContext context, String title, List<String> items, Color color, IconData icon) {
+  Widget _buildVerificationSection(
+    BuildContext context,
+    String title,
+    List<VerificationIssue> issues,
+    Color color,
+    IconData icon,
+    DataProvider data,
+    User user,
+    List<User> workers,
+  ) {
     final theme = Theme.of(context);
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.05),
+  color: color.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withOpacity(0.2)),
+  border: Border.all(color: color.withValues(alpha: 0.2)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -837,23 +865,493 @@ class _PHCDashboard extends StatelessWidget {
             children: [
               Icon(icon, color: color),
               const SizedBox(width: 8),
-              Text('$title (${items.length})', style: theme.textTheme.titleMedium?.copyWith(color: color, fontWeight: FontWeight.w600)),
+              Text(
+                '$title (${issues.length})',
+                style: theme.textTheme.titleMedium?.copyWith(
+                  color: color,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 8),
-          if (items.isEmpty) Text('No $title'.toLowerCase())
-          else ...items.take(6).map((e) => ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                title: Text(e),
-                trailing: TextButton(
-                  onPressed: () => _showFeatureNotAvailable(context),
-                  child: const Text('Review'),
-                ),
-              )),
+          if (issues.isEmpty)
+            Text('No ${title.toLowerCase()}')
+          else
+            ...issues.map(
+              (issue) => _buildIssueCard(
+                context,
+                issue,
+                data,
+                user,
+                workers,
+                color,
+              ),
+            ),
         ],
       ),
     );
+  }
+
+  Widget _buildIssueCard(
+    BuildContext context,
+    VerificationIssue issue,
+    DataProvider data,
+    User user,
+    List<User> workers,
+    Color accentColor,
+  ) {
+  final theme = Theme.of(context);
+  final resolved = data.isIssueResolved(issue.id);
+  final escalated = data.isIssueEscalated(issue.id);
+  final severityColor = _severityColor(issue.severity);
+  final resolvedBackground = theme.colorScheme.surfaceContainerHigh;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+    color: resolved ? resolvedBackground : theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: escalated ? Colors.deepOrange.shade400 : accentColor.withValues(alpha: 0.25),
+          width: escalated ? 1.5 : 1,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: theme.shadowColor.withValues(alpha: 0.05),
+            offset: const Offset(0, 2),
+            blurRadius: 6,
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                issue.type == IssueType.conflict
+                    ? Icons.report_problem_outlined
+                    : Icons.assignment_late_outlined,
+                color: severityColor,
+                size: 22,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            issue.title,
+                            style: theme.textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w600,
+                              decoration: resolved ? TextDecoration.lineThrough : null,
+                            ),
+                          ),
+                        ),
+                        _buildSeverityChip(context, issue.severity),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      issue.description,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                onPressed: () => _showIssueDetails(context, issue, data),
+                icon: const Icon(Icons.info_outline),
+                tooltip: 'View details',
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (issue.patientName != null)
+                _buildInfoChip(context, Icons.person_outline, issue.patientName!),
+              if (issue.ashaName != null)
+                _buildInfoChip(context, Icons.badge_outlined, 'ASHA: ${issue.ashaName}'),
+              _buildInfoChip(context, Icons.schedule, _formatTimeAgo(issue.detectedAt)),
+              _buildInfoChip(context, Icons.article_outlined, _recordTypeLabel(issue)),
+              if (resolved)
+                _buildInfoChip(context, Icons.check_circle, 'Resolved', iconColor: Colors.green.shade600),
+              if (escalated)
+                _buildInfoChip(context, Icons.flag, 'Escalated', iconColor: Colors.deepOrange.shade600),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              TextButton.icon(
+                onPressed: () {
+                  if (resolved) {
+                    data.reopenIssue(issue.id);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Issue reopened')),
+                    );
+                  } else {
+                    data.markIssueResolved(issue.id);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Issue marked as resolved')),
+                    );
+                  }
+                },
+                icon: Icon(resolved ? Icons.undo : Icons.check_circle_outline),
+                label: Text(resolved ? 'Reopen' : 'Resolve'),
+              ),
+              TextButton.icon(
+                onPressed: () {
+                  if (escalated) {
+                    data.deescalateIssue(issue.id);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Issue de-escalated')),
+                    );
+                  } else {
+                    data.escalateIssue(issue.id);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Issue escalated')),
+                    );
+                  }
+                },
+                icon: Icon(escalated ? Icons.outlined_flag : Icons.flag_outlined),
+                label: Text(escalated ? 'De-escalate' : 'Escalate'),
+              ),
+              TextButton.icon(
+                onPressed: workers.isEmpty
+                    ? null
+                    : () => _openFollowUpDialog(context, data, issue, workers, user),
+                icon: Icon(Icons.fact_check_outlined),
+                label: const Text('Assign follow-up'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _openFollowUpDialog(
+    BuildContext context,
+    DataProvider data,
+    VerificationIssue issue,
+    List<User> workers,
+    User user,
+  ) {
+    final noteController = TextEditingController(text: issue.description);
+    DateTime? dueDate = DateTime.now().add(const Duration(days: 2));
+    TaskPriority selectedPriority = issue.severity == IssueSeverity.high
+        ? TaskPriority.high
+        : (issue.severity == IssueSeverity.low ? TaskPriority.low : TaskPriority.medium);
+    String? selectedWorkerId = issue.ashaId ?? (workers.isNotEmpty ? workers.first.id : null);
+
+    showDialog(
+      context: context,
+      builder: (dialogCtx) {
+        return StatefulBuilder(
+          builder: (ctx, setState) {
+            return AlertDialog(
+              title: const Text('Assign follow-up task'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (workers.isEmpty)
+                      const Text('No ASHA workers available')
+                    else
+                      DropdownButtonFormField<String>(
+                        value: selectedWorkerId,
+                        decoration: const InputDecoration(labelText: 'Assign to'),
+                        items: workers
+                            .map((w) => DropdownMenuItem(value: w.id, child: Text(w.name)))
+                            .toList(),
+                        onChanged: (value) => setState(() => selectedWorkerId = value),
+                      ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<TaskPriority>(
+                      value: selectedPriority,
+                      decoration: const InputDecoration(labelText: 'Priority'),
+                      items: TaskPriority.values
+                          .map((p) => DropdownMenuItem(value: p, child: Text(p.name)))
+                          .toList(),
+                      onChanged: (value) {
+                        if (value != null) {
+                          setState(() => selectedPriority = value);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: () async {
+                          final today = DateTime.now();
+                          final picked = await showDatePicker(
+                            context: ctx,
+                            initialDate: dueDate ?? today,
+                            firstDate: today,
+                            lastDate: today.add(const Duration(days: 365)),
+                          );
+                          if (picked != null) {
+                            setState(() => dueDate = picked);
+                          }
+                        },
+                        icon: const Icon(Icons.event_outlined),
+                        label: Text(dueDate == null ? 'Pick due date' : _formatDate(dueDate!)),
+                      ),
+                    ),
+                    TextField(
+                      controller: noteController,
+                      maxLines: 3,
+                      decoration: const InputDecoration(labelText: 'Instructions for ASHA'),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogCtx).pop(),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: selectedWorkerId == null
+                      ? null
+                      : () {
+                          final target = _workerFromList(workers, selectedWorkerId);
+                          data.assignFollowUpFromIssue(
+                            issue,
+                            createdByUserId: user.id,
+                            createdByName: user.name,
+                            overrideAshaId: target?.id,
+                            overrideAshaName: target?.name,
+                            notes: noteController.text.trim().isEmpty ? null : noteController.text.trim(),
+                            dueDate: dueDate,
+                            priority: selectedPriority,
+                          );
+                          Navigator.of(dialogCtx).pop();
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Follow-up task assigned')),
+                          );
+                        },
+                  child: const Text('Assign task'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    ).then((_) => noteController.dispose());
+  }
+
+  User? _workerFromList(List<User> workers, String? id) {
+    if (id == null) return null;
+    try {
+      return workers.firstWhere((w) => w.id == id);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _showIssueDetails(BuildContext context, VerificationIssue issue, DataProvider data) {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (sheetCtx) {
+        final theme = Theme.of(sheetCtx);
+        final resolved = data.isIssueResolved(issue.id);
+        final escalated = data.isIssueEscalated(issue.id);
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 16,
+            right: 16,
+            top: 12,
+            bottom: MediaQuery.of(sheetCtx).viewInsets.bottom + 24,
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  issue.title,
+                  style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _buildSeverityChip(sheetCtx, issue.severity),
+                    if (issue.patientName != null)
+                      _buildInfoChip(sheetCtx, Icons.person_outline, issue.patientName!),
+                    if (issue.ashaName != null)
+                      _buildInfoChip(sheetCtx, Icons.badge_outlined, 'ASHA: ${issue.ashaName}'),
+                    _buildInfoChip(sheetCtx, Icons.schedule, _formatTimeAgo(issue.detectedAt)),
+                    _buildInfoChip(sheetCtx, Icons.article_outlined, _recordTypeLabel(issue)),
+                    if (resolved)
+                      _buildInfoChip(sheetCtx, Icons.check_circle, 'Resolved', iconColor: Colors.green.shade600),
+                    if (escalated)
+                      _buildInfoChip(sheetCtx, Icons.flag, 'Escalated', iconColor: Colors.deepOrange.shade600),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  issue.description,
+                  style: theme.textTheme.bodyMedium,
+                ),
+                if (issue.metadata != null && issue.metadata!.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  Text(
+                    'Metadata',
+                    style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 8),
+                  ...issue.metadata!.entries.map(
+                    (entry) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            flex: 2,
+                            child: Text(
+                              entry.key,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            flex: 3,
+                            child: Text(
+                              entry.value?.toString() ?? '-',
+                              style: theme.textTheme.bodySmall,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 24),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () => Navigator.of(sheetCtx).pop(),
+                    child: const Text('Close'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildSeverityChip(BuildContext context, IssueSeverity severity) {
+    final color = _severityColor(severity);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        severity.name.toUpperCase(),
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: color,
+              fontWeight: FontWeight.bold,
+            ),
+      ),
+    );
+  }
+
+  Widget _buildInfoChip(BuildContext context, IconData icon, String label, {Color? iconColor}) {
+  final theme = Theme.of(context);
+  final background = theme.colorScheme.surfaceContainerHigh.withValues(alpha: 0.6);
+    final textColor = theme.colorScheme.onSurfaceVariant;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: iconColor ?? theme.colorScheme.primary),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: theme.textTheme.bodySmall?.copyWith(color: textColor),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Color _severityColor(IssueSeverity severity) {
+    switch (severity) {
+      case IssueSeverity.high:
+        return Colors.red.shade600;
+      case IssueSeverity.medium:
+        return Colors.orange.shade600;
+      case IssueSeverity.low:
+        return Colors.blue.shade600;
+    }
+  }
+
+  String _recordTypeLabel(VerificationIssue issue) {
+    switch (issue.recordType) {
+      case VerificationRecordType.patient:
+        return 'Patient record';
+      case VerificationRecordType.ancVisit:
+        return 'ANC visit';
+      case VerificationRecordType.immunization:
+        return 'Immunization';
+    }
+  }
+
+  String _formatTimeAgo(DateTime timestamp) {
+    final now = DateTime.now();
+    final diff = now.difference(timestamp);
+
+    if (diff.isNegative) {
+      final ahead = timestamp.difference(now);
+      if (ahead.inMinutes < 60) return 'in ${ahead.inMinutes}m';
+      if (ahead.inHours < 24) return 'in ${ahead.inHours}h';
+      return 'in ${ahead.inDays}d';
+    }
+
+    if (diff.inMinutes < 1) return 'just now';
+    if (diff.inHours < 1) return '${diff.inMinutes}m ago';
+    if (diff.inDays < 1) return '${diff.inHours}h ago';
+    if (diff.inDays < 30) return '${diff.inDays}d ago';
+    final months = diff.inDays ~/ 30;
+    return months <= 1 ? '1mo ago' : '${months}mo ago';
+  }
+
+  String _formatDate(DateTime date) {
+    final local = date.toLocal();
+    final day = local.day.toString().padLeft(2, '0');
+    final month = local.month.toString().padLeft(2, '0');
+    final year = local.year;
+    return '$year-$month-$day';
   }
 
   void _handleLogout(BuildContext context) async {
@@ -864,12 +1362,4 @@ class _PHCDashboard extends StatelessWidget {
     }
   }
 
-  void _showFeatureNotAvailable(BuildContext context) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('This feature is not implemented yet'),
-        backgroundColor: Colors.orange,
-      ),
-    );
-  }
 }

@@ -8,6 +8,7 @@ import '../models/immunization.dart';
 import '../services/cloud_sync_service.dart';
 import '../models/user.dart';
 import '../models/asha_task.dart';
+import '../models/verification_issue.dart';
 
 class DataProvider extends ChangeNotifier {
   List<Patient> _patients = [];
@@ -19,6 +20,8 @@ class DataProvider extends ChangeNotifier {
   // Workforce and tasking
   final List<User> _ashaWorkers = [];
   final List<AshaTask> _ashaTasks = [];
+  final Set<String> _resolvedIssueIds = {};
+  final Set<String> _escalatedIssueIds = {};
   
   // Cloud sync properties
   final CloudApiService _cloudService = CloudApiService();
@@ -109,13 +112,13 @@ class DataProvider extends ChangeNotifier {
         age: 35,
         gender: Gender.male,
         maritalStatus: MaritalStatus.married,
-        phoneNumber: '+91 9876543221',
+        phoneNumber: '',
         village: 'Rampur',
         address: 'Ward 2, Rampur Village',
         familyHead: 'Ravi Kumar',
         emergencyContactName: 'Sunita Kumar',
         emergencyContactNumber: '+91 9876543220',
-        registeredBy: 'asha-001',
+        registeredBy: 'asha-002',
         registeredByRole: 'ASHA',
         registrationDate: DateTime(2024, 7, 10),
         isHighRisk: false,
@@ -235,6 +238,34 @@ class DataProvider extends ChangeNotifier {
         lastSync: DateTime.now().subtract(const Duration(hours: 3)),
       ),
     ]);
+
+    _syncMetadata.clear();
+    _syncMetadata.addAll({
+      'pat-001': SyncMetadata(
+        localId: 'pat-001',
+        cloudId: 'cloud-pat-001',
+        createdAt: _patients.first.registrationDate,
+        updatedAt: DateTime.now().subtract(const Duration(hours: 1)),
+        lastSyncAt: DateTime.now().subtract(const Duration(hours: 1)),
+        status: SyncStatus.synced,
+      ),
+      'pat-002': SyncMetadata(
+        localId: 'pat-002',
+        createdAt: _patients[1].registrationDate,
+        updatedAt: DateTime.now().subtract(const Duration(minutes: 45)),
+        lastSyncAt: DateTime.now().subtract(const Duration(minutes: 45)),
+        status: SyncStatus.conflict,
+        errorMessage: 'Cloud ABHA ID mismatch. Review patient identifiers.',
+      ),
+      'visit-001': SyncMetadata(
+        localId: 'visit-001',
+        createdAt: DateTime(2024, 9, 20, 9, 30),
+        updatedAt: DateTime.now().subtract(const Duration(hours: 2)),
+        lastSyncAt: DateTime.now().subtract(const Duration(hours: 2)),
+        status: SyncStatus.conflict,
+        errorMessage: 'Vitals updated on device but cloud still shows older values.',
+      ),
+    });
   }
 
   Future<void> _calculateDashboardStats() async {
@@ -429,53 +460,334 @@ class DataProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ========== PHC: Data verification helpers ==========
-  // Records with sync conflicts
-  List<String> getConflictRecords() {
-    final items = <String>[];
-    for (final p in _patients) {
-      if (getSyncStatus(p.id) == SyncStatus.conflict) {
-        items.add('Patient: ${p.name}');
-      }
+  User? _findWorkerById(String? ashaId) {
+    if (ashaId == null) return null;
+    try {
+      return _ashaWorkers.firstWhere((w) => w.id == ashaId);
+    } catch (_) {
+      return null;
     }
-    for (final v in _ancVisits) {
-      if (getSyncStatus(v.id) == SyncStatus.conflict) {
-        items.add('ANC Visit: ${v.patientName} • ${v.visitDate.toLocal().toIso8601String().substring(0,10)}');
-      }
-    }
-    for (final i in _immunizationRecords) {
-      if (getSyncStatus(i.id) == SyncStatus.conflict) {
-        items.add('Immunization: ${i.patientName} • ${i.vaccineType.displayName}');
-      }
-    }
-    return items;
   }
 
-  // Basic missing data checks
-  List<String> getIncompleteRecords() {
-    final issues = <String>[];
-    for (final p in _patients) {
-      if (p.phoneNumber.isEmpty || p.village.isEmpty) {
-        issues.add('Patient missing contact: ${p.name}');
-      }
-      if (p.isPregnant && (p.lmp == null || p.edd == null)) {
-        issues.add('Pregnancy dates missing: ${p.name}');
+  bool isIssueResolved(String issueId) => _resolvedIssueIds.contains(issueId);
+
+  bool isIssueEscalated(String issueId) => _escalatedIssueIds.contains(issueId);
+
+  // ========== PHC: Data verification helpers ==========
+  List<VerificationIssue> getConflictIssues({bool includeResolved = false}) {
+    final issues = <VerificationIssue>[];
+
+    for (final patient in _patients) {
+      final metadata = _syncMetadata[patient.id];
+      if (metadata?.status == SyncStatus.conflict) {
+        final issueId = 'conflict-patient-${patient.id}';
+        if (!includeResolved && isIssueResolved(issueId)) continue;
+        final worker = _findWorkerById(patient.registeredBy);
+        final detectedAt = metadata?.lastSyncAt ?? metadata?.updatedAt ?? DateTime.now();
+        issues.add(VerificationIssue(
+          id: issueId,
+          type: IssueType.conflict,
+          recordType: VerificationRecordType.patient,
+          recordId: patient.id,
+          title: 'Patient conflict: ${patient.name}',
+          description: metadata?.errorMessage ?? 'Mismatch detected between local device and cloud data.',
+          severity: IssueSeverity.high,
+          patientId: patient.id,
+          patientName: patient.name,
+          ashaId: patient.registeredBy,
+          ashaName: worker?.name,
+          detectedAt: detectedAt,
+          metadata: {
+            'status': metadata?.status.name,
+            'errorMessage': metadata?.errorMessage,
+            'resolved': isIssueResolved(issueId),
+            'escalated': isIssueEscalated(issueId),
+            'lastSyncAt': metadata?.lastSyncAt?.toIso8601String(),
+          },
+        ));
       }
     }
-    for (final v in _ancVisits) {
-      if (v.systolicBP == null || v.diastolicBP == null) {
-        issues.add('ANC missing BP: ${v.patientName} (${v.visitDate.toLocal().toIso8601String().substring(0,10)})');
-      }
-      if (v.hemoglobin == null) {
-        issues.add('ANC missing Hb: ${v.patientName}');
+
+    for (final visit in _visits) {
+      final metadata = _syncMetadata[visit.id];
+      if (metadata?.status == SyncStatus.conflict) {
+        final issueId = 'conflict-visit-${visit.id}';
+        if (!includeResolved && isIssueResolved(issueId)) continue;
+        final worker = _findWorkerById(visit.ashaId);
+        final detectedAt = metadata?.lastSyncAt ?? metadata?.updatedAt ?? DateTime.now();
+        issues.add(VerificationIssue(
+          id: issueId,
+          type: IssueType.conflict,
+          recordType: VerificationRecordType.ancVisit,
+          recordId: visit.id,
+          title: 'ANC visit conflict: ${visit.patientName}',
+          description: metadata?.errorMessage ?? 'Visit data differs from cloud copy. Verify vitals and notes.',
+          severity: IssueSeverity.medium,
+          patientId: visit.patientId,
+          patientName: visit.patientName,
+          ashaId: visit.ashaId,
+          ashaName: worker?.name ?? visit.ashaName,
+          detectedAt: detectedAt,
+          metadata: {
+            'status': metadata?.status.name,
+            'visitDate': visit.dateTime.toIso8601String(),
+            'errorMessage': metadata?.errorMessage,
+            'resolved': isIssueResolved(issueId),
+            'escalated': isIssueEscalated(issueId),
+          },
+        ));
       }
     }
-    for (final i in _immunizationRecords) {
-      if (i.batchNumber.isEmpty || i.vaccinatorId.isEmpty) {
-        issues.add('Immunization missing fields: ${i.patientName} • ${i.vaccineType.displayName}');
+
+    for (final record in _immunizationRecords) {
+      final metadata = _syncMetadata[record.id];
+      if (metadata?.status == SyncStatus.conflict) {
+        final issueId = 'conflict-immunization-${record.id}';
+        if (!includeResolved && isIssueResolved(issueId)) continue;
+        final worker = _findWorkerById(record.vaccinatorId);
+        final detectedAt = metadata?.lastSyncAt ?? metadata?.updatedAt ?? DateTime.now();
+        issues.add(VerificationIssue(
+          id: issueId,
+          type: IssueType.conflict,
+          recordType: VerificationRecordType.immunization,
+          recordId: record.id,
+          title: 'Immunization conflict: ${record.patientName}',
+          description: metadata?.errorMessage ?? 'Vaccination record differs from cloud entry.',
+          severity: IssueSeverity.medium,
+          patientId: record.patientId,
+          patientName: record.patientName,
+          ashaId: record.vaccinatorId,
+          ashaName: worker?.name ?? record.vaccinatorName,
+          detectedAt: detectedAt,
+          metadata: {
+            'status': metadata?.status.name,
+            'vaccine': record.vaccineType.displayName,
+            'errorMessage': metadata?.errorMessage,
+            'resolved': isIssueResolved(issueId),
+            'escalated': isIssueEscalated(issueId),
+          },
+        ));
       }
     }
+
+    issues.sort((a, b) {
+      final severityCompare = b.severity.index.compareTo(a.severity.index);
+      if (severityCompare != 0) return severityCompare;
+      return b.detectedAt.compareTo(a.detectedAt);
+    });
+
     return issues;
+  }
+
+  List<VerificationIssue> getIncompleteIssues({bool includeResolved = false}) {
+    final issues = <VerificationIssue>[];
+
+    for (final patient in _patients) {
+      if (patient.phoneNumber.trim().isEmpty) {
+        final issueId = 'incomplete-patient-${patient.id}-contact';
+        if (!includeResolved && isIssueResolved(issueId)) {
+          // skip
+        } else {
+          final worker = _findWorkerById(patient.registeredBy);
+          issues.add(VerificationIssue(
+            id: issueId,
+            type: IssueType.incomplete,
+            recordType: VerificationRecordType.patient,
+            recordId: patient.id,
+            title: 'Missing contact: ${patient.name}',
+            description: 'Phone number is missing for ${patient.name}. Update contact details.',
+            severity: IssueSeverity.medium,
+            patientId: patient.id,
+            patientName: patient.name,
+            ashaId: patient.registeredBy,
+            ashaName: worker?.name,
+            detectedAt: DateTime.now(),
+            metadata: {
+              'field': 'phoneNumber',
+              'resolved': isIssueResolved(issueId),
+              'escalated': isIssueEscalated(issueId),
+            },
+          ));
+        }
+      }
+
+      if (patient.isPregnant && (patient.lmp == null || patient.edd == null)) {
+        final issueId = 'incomplete-patient-${patient.id}-mch';
+        if (!includeResolved && isIssueResolved(issueId)) continue;
+        final worker = _findWorkerById(patient.registeredBy);
+        issues.add(VerificationIssue(
+          id: issueId,
+          type: IssueType.incomplete,
+          recordType: VerificationRecordType.patient,
+          recordId: patient.id,
+          title: 'Pregnancy milestones missing: ${patient.name}',
+          description: 'Expected delivery or LMP dates are not captured for ${patient.name}.',
+          severity: IssueSeverity.high,
+          patientId: patient.id,
+          patientName: patient.name,
+          ashaId: patient.registeredBy,
+          ashaName: worker?.name,
+          detectedAt: DateTime.now(),
+          metadata: {
+            'field': 'pregnancyTimeline',
+            'resolved': isIssueResolved(issueId),
+            'escalated': isIssueEscalated(issueId),
+          },
+        ));
+      }
+    }
+
+    for (final visit in _ancVisits) {
+      if (visit.systolicBP == null || visit.diastolicBP == null) {
+        final issueId = 'incomplete-visit-${visit.id}-bp';
+        if (!includeResolved && isIssueResolved(issueId)) continue;
+        final worker = _findWorkerById(visit.conductedBy);
+        issues.add(VerificationIssue(
+          id: issueId,
+          type: IssueType.incomplete,
+          recordType: VerificationRecordType.ancVisit,
+          recordId: visit.id,
+          title: 'ANC BP missing: ${visit.patientName}',
+          description: 'Blood pressure readings are missing for the ANC visit on ${visit.visitDate.toLocal().toIso8601String().substring(0, 10)}.',
+          severity: IssueSeverity.medium,
+          patientId: visit.patientId,
+          patientName: visit.patientName,
+          ashaId: visit.conductedBy,
+          ashaName: worker?.name ?? visit.conductedByName,
+          detectedAt: DateTime.now(),
+          metadata: {
+            'field': 'bloodPressure',
+            'resolved': isIssueResolved(issueId),
+            'escalated': isIssueEscalated(issueId),
+          },
+        ));
+      }
+
+      if (visit.hemoglobin == null) {
+        final issueId = 'incomplete-visit-${visit.id}-hb';
+        if (!includeResolved && isIssueResolved(issueId)) continue;
+        final worker = _findWorkerById(visit.conductedBy);
+        issues.add(VerificationIssue(
+          id: issueId,
+          type: IssueType.incomplete,
+          recordType: VerificationRecordType.ancVisit,
+          recordId: visit.id,
+          title: 'ANC Hb missing: ${visit.patientName}',
+          description: 'Hemoglobin value is missing for ${visit.patientName}\'s ANC visit.',
+          severity: IssueSeverity.low,
+          patientId: visit.patientId,
+          patientName: visit.patientName,
+          ashaId: visit.conductedBy,
+          ashaName: worker?.name ?? visit.conductedByName,
+          detectedAt: DateTime.now(),
+          metadata: {
+            'field': 'hemoglobin',
+            'resolved': isIssueResolved(issueId),
+            'escalated': isIssueEscalated(issueId),
+          },
+        ));
+      }
+    }
+
+    for (final record in _immunizationRecords) {
+      if (record.batchNumber.trim().isEmpty || record.vaccinatorId.trim().isEmpty) {
+        final issueId = 'incomplete-immunization-${record.id}-fields';
+        if (!includeResolved && isIssueResolved(issueId)) continue;
+        final worker = _findWorkerById(record.vaccinatorId);
+        issues.add(VerificationIssue(
+          id: issueId,
+          type: IssueType.incomplete,
+          recordType: VerificationRecordType.immunization,
+          recordId: record.id,
+          title: 'Immunization details missing: ${record.patientName}',
+          description: 'Batch number or vaccinator ID is missing for ${record.vaccineType.displayName}.',
+          severity: IssueSeverity.medium,
+          patientId: record.patientId,
+          patientName: record.patientName,
+          ashaId: record.vaccinatorId,
+          ashaName: worker?.name ?? record.vaccinatorName,
+          detectedAt: DateTime.now(),
+          metadata: {
+            'field': 'batchOrVaccinator',
+            'resolved': isIssueResolved(issueId),
+            'escalated': isIssueEscalated(issueId),
+          },
+        ));
+      }
+    }
+
+    issues.sort((a, b) {
+      final severityCompare = b.severity.index.compareTo(a.severity.index);
+      if (severityCompare != 0) return severityCompare;
+      return b.detectedAt.compareTo(a.detectedAt);
+    });
+
+    return issues;
+  }
+
+  VerificationIssue? getIssueById(String issueId) {
+    final combined = <VerificationIssue>[
+      ...getConflictIssues(includeResolved: true),
+      ...getIncompleteIssues(includeResolved: true),
+    ];
+    try {
+      return combined.firstWhere((issue) => issue.id == issueId);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void markIssueResolved(String issueId) {
+    if (_resolvedIssueIds.add(issueId)) {
+      notifyListeners();
+    }
+  }
+
+  void reopenIssue(String issueId) {
+    if (_resolvedIssueIds.remove(issueId)) {
+      notifyListeners();
+    }
+  }
+
+  void escalateIssue(String issueId) {
+    if (_escalatedIssueIds.add(issueId)) {
+      notifyListeners();
+    }
+  }
+
+  void deescalateIssue(String issueId) {
+    if (_escalatedIssueIds.remove(issueId)) {
+      notifyListeners();
+    }
+  }
+
+  void assignFollowUpFromIssue(
+    VerificationIssue issue, {
+    required String createdByUserId,
+    required String createdByName,
+    String? overrideAshaId,
+    String? overrideAshaName,
+    String? notes,
+    DateTime? dueDate,
+    TaskPriority? priority,
+  }) {
+    final fallbackWorker = _ashaWorkers.isNotEmpty ? _ashaWorkers.first : null;
+    final assignedId = overrideAshaId ?? issue.ashaId ?? fallbackWorker?.id;
+    final assignedName = overrideAshaName ?? issue.ashaName ?? _findWorkerById(assignedId)?.name ?? fallbackWorker?.name;
+    if (assignedId == null || assignedName == null) return;
+
+    assignTask(
+      title: 'Resolve: ${issue.title}',
+      description: notes ?? issue.description,
+      dueDate: dueDate ?? DateTime.now().add(const Duration(days: 2)),
+      priority: priority ?? (issue.severity == IssueSeverity.high ? TaskPriority.high : TaskPriority.medium),
+      ashaId: assignedId,
+      ashaName: assignedName,
+      patientId: issue.patientId,
+      patientName: issue.patientName,
+      createdByUserId: createdByUserId,
+      createdByName: createdByName,
+    );
   }
 
   // ANC Visit Management
