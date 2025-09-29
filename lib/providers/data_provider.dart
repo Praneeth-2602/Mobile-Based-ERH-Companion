@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'dart:convert';
+import '../services/isar_service.dart';
 import '../models/patient.dart';
 import '../models/visit.dart';
 import '../models/dashboard_stats.dart';
@@ -56,13 +58,79 @@ class DataProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await _loadMockData();
+      final loaded = await _loadFromLocal();
+      if (!loaded) {
+        await _loadMockData();
+        await _persistAllToLocal();
+      }
       await _calculateDashboardStats();
     } catch (e) {
       debugPrint('Error initializing data: $e');
     } finally {
       _isLoading = false;
       notifyListeners();
+    }
+  }
+
+  // Load from Isar local DB; returns true if any domain data found
+  Future<bool> _loadFromLocal() async {
+    try {
+      final patientRecords = await IsarService.getAll('patient');
+      final ancRecords = await IsarService.getAll('anc_visit');
+      final immRecords = await IsarService.getAll('immunization');
+      final visitRecords = await IsarService.getAll('visit');
+      final reminderRecords = await IsarService.getAll('reminder');
+
+      final hasAny = patientRecords.isNotEmpty || ancRecords.isNotEmpty || immRecords.isNotEmpty || visitRecords.isNotEmpty || reminderRecords.isNotEmpty;
+      if (!hasAny) return false;
+
+      _patients = [
+        for (final r in patientRecords)
+          Patient.fromJson(jsonDecode(r.json) as Map<String, dynamic>)
+      ];
+      _ancVisits = [
+        for (final r in ancRecords)
+          ANCVisit.fromJson(jsonDecode(r.json) as Map<String, dynamic>)
+      ];
+      _immunizationRecords = [
+        for (final r in immRecords)
+          ImmunizationRecord.fromJson(jsonDecode(r.json) as Map<String, dynamic>)
+      ];
+      _visits = [
+        for (final r in visitRecords)
+          Visit.fromJson(jsonDecode(r.json) as Map<String, dynamic>)
+      ];
+      _reminders = [
+        for (final r in reminderRecords)
+          Reminder.fromJson(jsonDecode(r.json) as Map<String, dynamic>)
+      ];
+
+      return true;
+    } catch (e) {
+      debugPrint('Error loading from local DB: $e');
+      return false;
+    }
+  }
+
+  Future<void> _persistAllToLocal() async {
+    try {
+      for (final p in _patients) {
+        await IsarService.put('patient', p.id, jsonEncode(p.toJson()));
+      }
+      for (final v in _ancVisits) {
+        await IsarService.put('anc_visit', v.id, jsonEncode(v.toJson()));
+      }
+      for (final r in _immunizationRecords) {
+        await IsarService.put('immunization', r.id, jsonEncode(r.toJson()));
+      }
+      for (final v in _visits) {
+        await IsarService.put('visit', v.id, jsonEncode(v.toJson()));
+      }
+      for (final r in _reminders) {
+        await IsarService.put('reminder', r.id, jsonEncode(r.toJson()));
+      }
+    } catch (e) {
+      debugPrint('Error persisting all to local DB: $e');
     }
   }
 
@@ -301,6 +369,8 @@ class DataProvider extends ChangeNotifier {
   // CRUD operations for patients
   Future<void> addPatient(Patient patient) async {
     _patients.add(patient);
+    // persist
+    await IsarService.put('patient', patient.id, jsonEncode(patient.toJson()));
     await _calculateDashboardStats();
     notifyListeners();
   }
@@ -309,6 +379,7 @@ class DataProvider extends ChangeNotifier {
     final index = _patients.indexWhere((p) => p.id == patient.id);
     if (index != -1) {
       _patients[index] = patient;
+      await IsarService.put('patient', patient.id, jsonEncode(patient.toJson()));
       await _calculateDashboardStats();
       notifyListeners();
     }
@@ -318,6 +389,7 @@ class DataProvider extends ChangeNotifier {
     _patients.removeWhere((p) => p.id == patientId);
     _visits.removeWhere((v) => v.patientId == patientId);
     _reminders.removeWhere((r) => r.patientId == patientId);
+    await IsarService.delete('patient', patientId);
     await _calculateDashboardStats();
     notifyListeners();
   }
@@ -325,6 +397,7 @@ class DataProvider extends ChangeNotifier {
   // CRUD operations for visits
   Future<void> addVisit(Visit visit) async {
     _visits.add(visit);
+    await IsarService.put('visit', visit.id, jsonEncode(visit.toJson()));
     await _calculateDashboardStats();
     notifyListeners();
   }
@@ -333,6 +406,7 @@ class DataProvider extends ChangeNotifier {
     final index = _visits.indexWhere((v) => v.id == visit.id);
     if (index != -1) {
       _visits[index] = visit;
+      await IsarService.put('visit', visit.id, jsonEncode(visit.toJson()));
       await _calculateDashboardStats();
       notifyListeners();
     }
@@ -353,6 +427,7 @@ class DataProvider extends ChangeNotifier {
         isHighPriority: _reminders[index].isHighPriority,
         relatedVisitType: _reminders[index].relatedVisitType,
       );
+      await IsarService.put('reminder', _reminders[index].id, jsonEncode(_reminders[index].toJson()));
       await _calculateDashboardStats();
       notifyListeners();
     }
@@ -803,6 +878,9 @@ class DataProvider extends ChangeNotifier {
         _ancVisits.add(visit);
       }
 
+      // Persist
+      await IsarService.put('anc_visit', visit.id, jsonEncode(visit.toJson()));
+
       // Update dashboard stats
       await _calculateDashboardStats();
 
@@ -849,6 +927,7 @@ class DataProvider extends ChangeNotifier {
   Future<void> deleteANCVisit(String visitId) async {
     try {
       _ancVisits.removeWhere((visit) => visit.id == visitId);
+      await IsarService.delete('anc_visit', visitId);
       await _calculateDashboardStats();
       notifyListeners();
     } catch (e) {
@@ -869,6 +948,9 @@ class DataProvider extends ChangeNotifier {
       } else {
         _immunizationRecords.add(record);
       }
+
+      // Persist
+      await IsarService.put('immunization', record.id, jsonEncode(record.toJson()));
 
       // Update dashboard stats
       await _calculateDashboardStats();
@@ -936,6 +1018,7 @@ class DataProvider extends ChangeNotifier {
   Future<void> deleteImmunizationRecord(String recordId) async {
     try {
       _immunizationRecords.removeWhere((record) => record.id == recordId);
+      await IsarService.delete('immunization', recordId);
       await _calculateDashboardStats();
       notifyListeners();
     } catch (e) {

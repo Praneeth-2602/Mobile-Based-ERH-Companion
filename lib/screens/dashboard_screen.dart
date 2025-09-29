@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../services/export_service.dart';
 import 'package:provider/provider.dart';
 import '../models/user.dart';
 import '../providers/auth_provider.dart';
@@ -13,6 +14,8 @@ import 'immunization_form.dart';
 import '../services/cloud_sync_service.dart' as cloud;
 import '../models/asha_task.dart';
 import '../models/verification_issue.dart';
+import 'package:fl_chart/fl_chart.dart';
+import '../models/visit.dart';
 
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key});
@@ -1153,58 +1156,486 @@ class _ANMDashboard extends StatelessWidget {
   }
 }
 
-class _PHCDashboard extends StatelessWidget {
-    final User user;
-    const _PHCDashboard({required this.user});
+class _PHCDashboard extends StatefulWidget {
+  final User user;
+  const _PHCDashboard({required this.user});
 
-    @override
-    Widget build(BuildContext context) {
-      // Placeholder for higher-level reporting and analytics
-    return Scaffold(
-        body: CustomScrollView(
+  @override
+  State<_PHCDashboard> createState() => _PHCDashboardState();
+}
+
+class _PHCDashboardState extends State<_PHCDashboard> {
+  String _selectedVillage = 'All';
+  String _selectedAnm = 'All';
+  bool _exporting = false;
+
+  List<DateTime> _lastNMonths(int n) {
+    final now = DateTime.now();
+    return List.generate(n, (i) => DateTime(now.year, now.month - (n - 1 - i), 1));
+  }
+
+  bool _sameMonth(DateTime a, DateTime b) => a.year == b.year && a.month == b.month;
+
+  String _monthKey(DateTime d) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return months[d.month - 1];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Consumer<DataProvider>(
+      builder: (context, data, _) {
+        // Villages
+        final villages = ['All', ...{
+          for (final p in data.patients) p.village
+        }];
+
+        // Filtered patients
+        final patients = _selectedVillage == 'All'
+            ? data.patients
+            : data.patients.where((p) => p.village == _selectedVillage).toList();
+        final patientIds = patients.map((p) => p.id).toSet();
+
+        // Filtered immunizations/visits/reminders
+        final immunizations = data.immunizationRecords.where((i) => patientIds.contains(i.patientId)).toList();
+        final visits = data.visits.where((v) => patientIds.contains(v.patientId)).toList();
+        final reminders = data.reminders.where((r) => patientIds.contains(r.patientId)).toList();
+
+        // Compute ANM list from vaccinators (placeholder until directory exists)
+        final anms = ['All', ...{
+          for (final i in immunizations) i.vaccinatorName
+        }];
+
+        // Optional ANM filter application (only to immunizations for now)
+        final filteredImmunizations = _selectedAnm == 'All'
+            ? immunizations
+            : immunizations.where((i) => i.vaccinatorName == _selectedAnm).toList();
+
+        // KPIs
+        final totalPatients = patients.length;
+        final highRiskPatients = patients.where((p) => p.isHighRisk).length;
+        final workersSet = <String>{
+          ...visits.map((v) => v.ashaId),
+          ...filteredImmunizations.map((i) => i.vaccinatorId),
+        };
+        workersSet.removeWhere((e) => e.isEmpty);
+        final activeWorkers = workersSet.length;
+
+        // Immunization coverage series (last 5 months)
+        final months = _lastNMonths(5);
+        final coverageSeries = months.map((m) {
+          final administered = filteredImmunizations.where((i) => _sameMonth(i.vaccinationDate, m)).length;
+          final due = reminders.where((r) => r.relatedVisitType == VisitType.immunization && _sameMonth(r.dueDate, m) && !r.isCompleted).length;
+          final denom = administered + due;
+          final coverage = denom == 0 ? 0 : ((administered / denom) * 100).round();
+          return {'label': _monthKey(m), 'value': coverage};
+        }).toList();
+
+        final now = DateTime.now();
+        final currentMonthAdmin = filteredImmunizations.where((i) => _sameMonth(i.vaccinationDate, now)).length;
+        final currentMonthDue = reminders.where((r) => r.relatedVisitType == VisitType.immunization && _sameMonth(r.dueDate, now) && !r.isCompleted).length;
+        final currentCoverage = (currentMonthAdmin + currentMonthDue) == 0
+            ? 0
+            : ((currentMonthAdmin / (currentMonthAdmin + currentMonthDue)) * 100).round();
+
+        // ANC completion breakdown (current month)
+        final ancVisitsThisMonth = visits.where((v) => v.type == VisitType.anc && _sameMonth(v.dateTime, now)).toList();
+        final ancRemindersThisMonth = reminders.where((r) => r.relatedVisitType == VisitType.anc && _sameMonth(r.dueDate, now)).toList();
+        final completedAnc = ancVisitsThisMonth.map((v) => v.patientId).toSet();
+        final overdueAnc = ancRemindersThisMonth.where((r) => r.dueDate.isBefore(DateTime.now()) && !completedAnc.contains(r.patientId)).length;
+        final totalPlannedAnc = ancRemindersThisMonth.length;
+        final completedCount = completedAnc.length;
+        final inProgressAnc = (totalPlannedAnc - completedCount - overdueAnc).clamp(0, totalPlannedAnc);
+
+        // Sync/alerts
+        final syncCounts = data.getSyncStatusCounts();
+        final pendingCount = (syncCounts[cloud.SyncStatus.pending] ?? 0) + (syncCounts[cloud.SyncStatus.failed] ?? 0);
+
+        return CustomScrollView(
           slivers: [
             SliverAppBar(
               expandedHeight: 120,
               floating: false,
               pinned: true,
-              backgroundColor: Theme.of(context).colorScheme.primary,
+              backgroundColor: theme.colorScheme.primary,
               flexibleSpace: FlexibleSpaceBar(
                 title: Column(
                   mainAxisAlignment: MainAxisAlignment.end,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Welcome, ${user.name.split(' ').first}',
+                      'Welcome, ${widget.user.name.split(' ').first}',
                       style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
                     ),
                     const Text(
-                      'PHC Reporting',
+                      'PHC Analytics',
                       style: TextStyle(color: Colors.white70, fontSize: 12),
                     ),
                   ],
                 ),
                 titlePadding: const EdgeInsets.only(left: 16, bottom: 16),
               ),
-              actions: const [SyncStatus(), SizedBox(width: 8)],
+              actions: [
+                const SyncStatus(),
+                IconButton(
+                  tooltip: _exporting ? 'Exporting...' : 'Export data to JSON',
+                  onPressed: _exporting
+                      ? null
+                      : () async {
+                          setState(() => _exporting = true);
+                          try {
+                            final payload = {
+                              'generatedAt': DateTime.now().toIso8601String(),
+                              'patients': data.patients.map((e) => e.toJson()).toList(),
+                              'ancVisits': data.ancVisits.map((e) => e.toJson()).toList(),
+                              'immunizations': data.immunizationRecords.map((e) => e.toJson()).toList(),
+                              'visits': data.visits.map((e) => e.toJson()).toList(),
+                              'reminders': data.reminders.map((e) => e.toJson()).toList(),
+                            };
+                            final path = await ExportService.exportJson(
+                                'export_${DateTime.now().millisecondsSinceEpoch}.json', payload);
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Exported to: $path')),
+                            );
+                          } catch (e) {
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Export failed: $e')),
+                            );
+                          } finally {
+                            if (mounted) setState(() => _exporting = false);
+                          }
+                        },
+                  icon: _exporting
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Icon(Icons.file_download_outlined, color: Colors.white),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.logout, color: Colors.white),
+                  tooltip: 'Logout',
+                  onPressed: () => _handleLogout(context),
+                ),
+                const SizedBox(width: 8),
+              ],
             ),
             SliverPadding(
               padding: const EdgeInsets.all(16),
               sliver: SliverList(
                 delegate: SliverChildListDelegate([
-                  const SizedBox(height: 24),
-                  const Center(
-                    child: Text('Analytics and reports will appear here.',
-                        style: TextStyle(fontSize: 16)),
+                  // Filters
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.grey.shade200),
+                    ),
+                    child: Wrap(
+                      spacing: 12,
+                      runSpacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.location_on_outlined, size: 18, color: Colors.grey),
+                          const SizedBox(width: 6),
+                          DropdownButton<String>(
+                            value: villages.contains(_selectedVillage) ? _selectedVillage : 'All',
+                            items: villages.map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
+                            onChanged: (v) => setState(() => _selectedVillage = v ?? 'All'),
+                          ),
+                        ]),
+                        Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.badge_outlined, size: 18, color: Colors.grey),
+                          const SizedBox(width: 6),
+                          DropdownButton<String>(
+                            value: anms.contains(_selectedAnm) ? _selectedAnm : 'All',
+                            items: anms.map((a) => DropdownMenuItem(value: a, child: Text(a))).toList(),
+                            onChanged: (a) => setState(() => _selectedAnm = a ?? 'All'),
+                          ),
+                        ]),
+                      ],
+                    ),
                   ),
-                  const SizedBox(height: 400),
+
+                  const SizedBox(height: 16),
+
+                  // KPI grid
+                  GridView.count(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    crossAxisCount: 2,
+                    mainAxisSpacing: 16,
+                    crossAxisSpacing: 16,
+                    childAspectRatio: 1.2,
+                    children: [
+                      StatCard(
+                        title: 'Total Patients',
+                        value: '$totalPatients',
+                        icon: Icons.people,
+                        color: Colors.blue,
+                        subtitle: 'Registered',
+                        onTap: () {},
+                      ),
+                      StatCard(
+                        title: 'Immunization Coverage',
+                        value: '$currentCoverage%',
+                        icon: Icons.trending_up,
+                        color: Colors.green,
+                        subtitle: 'Current month',
+                        onTap: () {},
+                      ),
+                      StatCard(
+                        title: 'High Risk Cases',
+                        value: '$highRiskPatients',
+                        icon: Icons.warning_amber_rounded,
+                        color: Colors.red,
+                        subtitle: 'Needs review',
+                        onTap: () {},
+                      ),
+                      StatCard(
+                        title: 'Active Workers',
+                        value: '$activeWorkers',
+                        icon: Icons.monitor_heart_outlined,
+                        color: Colors.teal,
+                        subtitle: 'Recent activity',
+                        onTap: () {},
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 24),
+
+                  // Charts row
+                  Row(
+                    children: [
+                      // Immunization coverage bar chart
+                      Expanded(
+                        child: Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.grey.shade200),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Immunization Coverage (%)', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+                              const SizedBox(height: 12),
+                              SizedBox(
+                                height: 200,
+                                child: BarChart(
+                                  BarChartData(
+                                    gridData: FlGridData(show: true, drawVerticalLine: false, getDrawingHorizontalLine: (value) => FlLine(color: Colors.grey.shade300, strokeWidth: 1)),
+                                    titlesData: FlTitlesData(
+                                      leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, interval: 20)),
+                                      rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                                      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                                      bottomTitles: AxisTitles(
+                                        sideTitles: SideTitles(
+                                          showTitles: true,
+                                          getTitlesWidget: (value, meta) {
+                                            final idx = value.toInt();
+                                            if (idx >= 0 && idx < coverageSeries.length) {
+                                              return Text(coverageSeries[idx]['label'] as String, style: TextStyle(color: Colors.grey.shade600, fontSize: 12));
+                                            }
+                                            return const SizedBox.shrink();
+                                          },
+                                        ),
+                                      ),
+                                    ),
+                                    borderData: FlBorderData(show: true, border: Border.all(color: Colors.grey.shade300)),
+                                    barGroups: [
+                                      for (int i = 0; i < coverageSeries.length; i++)
+                                        BarChartGroupData(x: i, barRods: [
+                                          BarChartRodData(toY: (coverageSeries[i]['value'] as int).toDouble(), color: theme.colorScheme.primary, width: 14, borderRadius: BorderRadius.circular(4)),
+                                        ]),
+                                    ],
+                                    minY: 0,
+                                    maxY: 100,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+
+                      const SizedBox(width: 16),
+
+                      // ANC completion pie
+                      Expanded(
+                        child: Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.grey.shade200),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('ANC Completion (This Month)', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+                              const SizedBox(height: 12),
+                              SizedBox(
+                                height: 200,
+                                child: PieChart(
+                                  PieChartData(
+                                    sectionsSpace: 2,
+                                    centerSpaceRadius: 40,
+                                    sections: [
+                                      PieChartSectionData(value: completedCount.toDouble(), color: Colors.green.shade600, title: 'Completed', radius: 60, titleStyle: const TextStyle(color: Colors.white, fontSize: 10)),
+                                      PieChartSectionData(value: inProgressAnc.toDouble(), color: Colors.orange.shade600, title: 'In Prog', radius: 56, titleStyle: const TextStyle(color: Colors.white, fontSize: 10)),
+                                      PieChartSectionData(value: overdueAnc.toDouble(), color: Colors.red.shade600, title: 'Overdue', radius: 52, titleStyle: const TextStyle(color: Colors.white, fontSize: 10)),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 12,
+                                children: [
+                                  _legendDot(Colors.green.shade600, 'Completed: $completedCount'),
+                                  _legendDot(Colors.orange.shade600, 'In Progress: $inProgressAnc'),
+                                  _legendDot(Colors.red.shade600, 'Overdue: $overdueAnc'),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 24),
+
+                  // Workforce status
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: Colors.grey.shade200),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Workforce Status', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+                        const SizedBox(height: 12),
+                        ...data.ashaWorkers.map((w) => Container(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: Colors.grey.shade50,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.grey.shade200),
+                              ),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    width: 10,
+                                    height: 10,
+                                    decoration: BoxDecoration(
+                                      color: w.isOnline ? Colors.green : Colors.grey,
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(w.name, style: const TextStyle(fontWeight: FontWeight.w600)),
+                                        Text('${w.role.name.toUpperCase()} • ${w.village ?? ''}', style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
+                                      ],
+                                    ),
+                                  ),
+                                  Text(_formatTimeAgo(w.lastSync ?? DateTime.now()), style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
+                                ],
+                              ),
+                            )),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
+
+                  // Alerts
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.amber.shade50,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: Colors.amber.shade200),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: const [
+                            Icon(Icons.warning_amber_rounded, color: Colors.amber),
+                            SizedBox(width: 8),
+                            Text('Pending Approvals & Alerts', style: TextStyle(fontWeight: FontWeight.w700)),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        _alertRow('${highRiskPatients} high-risk patient(s) need review', chipText: 'Review'),
+                        _alertRow('$pendingCount item(s) pending sync', chipText: pendingCount > 0 ? 'Resolve' : 'OK', destructive: pendingCount > 0),
+                        _alertRow('Monthly report due soon', chipText: 'Reminder', outline: true),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 80),
                 ]),
               ),
             ),
           ],
-        ),
-      );
-    }
+        );
+      },
+    );
   }
+
+  Widget _legendDot(Color color, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(width: 10, height: 10, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+        const SizedBox(width: 6),
+        Text(label, style: const TextStyle(fontSize: 12)),
+      ],
+    );
+  }
+
+  Widget _alertRow(String text, {required String chipText, bool destructive = false, bool outline = false}) {
+    final bg = Colors.white;
+    final chipColor = destructive ? Colors.red : (outline ? Colors.transparent : Colors.amber);
+    final chipBorder = outline ? Border.all(color: Colors.grey.shade400) : null;
+    final chipTextColor = destructive ? Colors.white : (outline ? Colors.grey.shade700 : Colors.black87);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.grey.shade200)),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Expanded(child: Text(text, style: const TextStyle(fontSize: 13))),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(color: chipColor, borderRadius: BorderRadius.circular(16), border: chipBorder),
+            child: Text(chipText, style: TextStyle(fontSize: 12, color: chipTextColor)),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
   void _showIssueDetails(BuildContext context, VerificationIssue issue, DataProvider data) {
     showModalBottomSheet(
